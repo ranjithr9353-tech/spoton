@@ -1,75 +1,149 @@
-"""SpotON slot detector (your original Colab logic, refactored into a module)."""
+"""SpotON detector.
+Real photo in -> vehicles found with YOLO (pretrained, COCO) -> each parking slot marked
+occupied / vacant. Falls back to a basic OpenCV edge method if YOLO is not installed.
+Slots are polygons in NORMALISED coordinates (0..1) so they survive image resizing.
+"""
+import importlib.util
+import os
+
 import cv2
 import numpy as np
 
-SLOTS = {
-    1: [(65.0, 101.7), (93.3, 98.3), (88.3, 140.0), (58.3, 126.7)],
-    2: [(93.3, 98.3), (123.3, 96.7), (120.0, 138.3), (88.3, 140.0)],
-    3: [(123.3, 96.7), (153.3, 95.0), (151.7, 136.7), (120.0, 138.3)],
-    4: [(153.3, 95.0), (183.3, 94.3), (181.7, 135.0), (151.7, 136.7)],
-    5: [(183.3, 94.3), (213.3, 93.3), (211.7, 133.3), (181.7, 135.0)],
-    6: [(213.3, 93.3), (243.3, 103.3), (240.0, 131.7), (211.7, 133.3)],
-    7: [(243.3, 103.3), (273.3, 105.0), (271.7, 133.3), (240.0, 131.7)],
-    8: [(273.3, 105.0), (303.3, 108.3), (301.7, 135.0), (271.7, 133.3)],
-    9: [(303.3, 108.3), (333.3, 111.7), (331.7, 136.7), (301.7, 135.0)],
-    10: [(333.3, 111.7), (363.3, 115.0), (361.7, 138.3), (331.7, 136.7)],
-    11: [(363.3, 115.0), (393.3, 118.3), (391.7, 140.0), (361.7, 138.3)],
-    12: [(393.3, 118.3), (423.3, 121.7), (421.7, 141.7), (391.7, 140.0)],
-}
+MAX_SIDE = 1280
+VEHICLE_CLASSES = [2, 3, 5, 7]            # COCO: car, motorcycle, bus, truck
+YOLO_CONF = float(os.environ.get("YOLO_CONF", "0.25"))
+YOLO_MODEL = os.environ.get("YOLO_MODEL", "yolov8n.pt")   # auto-downloaded on first use
+CLASSIC_THRESHOLD = 0.33
 
-GROUND_TRUTH = {i: "Occupied" for i in range(1, 7)}
-GROUND_TRUTH.update({i: "Vacant" for i in range(7, 13)})
-
-OCCUPANCY_THRESHOLD = 0.33
-REF_SIZE = (480, 240)  # (w, h) frame size the slot polygons were drawn for
+_yolo = {"model": None, "error": None, "tried": False}
 
 
-def slot_mask(shape, polygon):
-    mask = np.zeros(shape, dtype=np.uint8)
-    cv2.fillPoly(mask, [np.array(polygon, dtype=np.int32)], 255)
-    return mask
+def yolo_installed():
+    return importlib.util.find_spec("ultralytics") is not None
 
 
-def slot_feature_score(gray, edges, mask):
-    area = max(cv2.countNonZero(mask), 1)
-    edge_density = cv2.countNonZero(cv2.bitwise_and(edges, edges, mask=mask)) / area
-    region_std = float(np.std(gray[mask == 255]))
-    return edge_density + (region_std / 200.0)
+def get_yolo():
+    if not _yolo["tried"]:
+        _yolo["tried"] = True
+        try:
+            from ultralytics import YOLO
+            _yolo["model"] = YOLO(YOLO_MODEL)
+        except Exception as e:  # not installed / no internet for the weights
+            _yolo["error"] = f"{type(e).__name__}: {e}"
+    return _yolo["model"]
 
 
-def classify_slots(image_path):
-    img = cv2.imread(image_path)
+def read_image(path):
+    img = cv2.imread(path)
     if img is None:
-        raise FileNotFoundError(f"Could not read image: {image_path}")
-    img = cv2.resize(img, REF_SIZE)  # any uploaded image is fitted to the polygon grid
+        raise ValueError(f"Could not read image: {path}")
+    h, w = img.shape[:2]
+    s = MAX_SIDE / max(h, w)
+    return cv2.resize(img, (int(w * s), int(h * s))) if s < 1 else img
+
+
+def detect_vehicles(model, img):
+    res = model.predict(img, conf=YOLO_CONF, imgsz=1024, classes=VEHICLE_CLASSES, verbose=False)[0]
+    out = []
+    for b in res.boxes:
+        x1, y1, x2, y2 = b.xyxy[0].tolist()
+        out.append((x1, y1, x2, y2, float(b.conf[0])))
+    return out
+
+
+def _hull(poly):
+    return cv2.convexHull(np.array(poly, np.float32)).reshape(-1, 2)
+
+
+def assign_boxes(polys, boxes):
+    """Give every vehicle box to at most one slot. Returns ({slot: conf}, [max_overlap per slot])."""
+    hulls = [_hull(p) for p in polys]
+    areas = [max(float(cv2.contourArea(h)), 1.0) for h in hulls]
+    occupied, overlap = {}, [0.0] * len(polys)
+    for x1, y1, x2, y2, conf in boxes:
+        foot = (float((x1 + x2) / 2), float(y2 - 0.2 * (y2 - y1)))   # where the car meets the ground
+        rect = np.array([[x1, y1], [x2, y1], [x2, y2], [x1, y2]], np.float32)
+        ratios = []
+        for i, h in enumerate(hulls):
+            inter, _ = cv2.intersectConvexConvex(h, rect)
+            ratios.append(inter / areas[i])
+            overlap[i] = max(overlap[i], ratios[-1])
+        inside = [i for i, h in enumerate(hulls)
+                  if cv2.pointPolygonTest(h.reshape(-1, 1, 2), foot, False) >= 0]
+        best = max(inside, key=lambda i: ratios[i]) if inside else None
+        if best is None and ratios:
+            i = int(np.argmax(ratios))
+            best = i if ratios[i] >= 0.35 else None
+        if best is not None:
+            occupied[best] = max(occupied.get(best, 0.0), conf)
+    return occupied, overlap
+
+
+def _classic_scores(img, polys):
     gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
     edges = cv2.Canny(gray, 50, 150)
+    out = []
+    for p in polys:
+        mask = np.zeros(gray.shape, np.uint8)
+        cv2.fillPoly(mask, [np.array(p, np.int32)], 255)
+        n = cv2.countNonZero(mask)
+        if n == 0:
+            out.append(0.0)
+            continue
+        dens = cv2.countNonZero(cv2.bitwise_and(edges, edges, mask=mask)) / n
+        out.append(dens + float(np.std(gray[mask == 255])) / 200.0)
+    return out
 
-    results = {}
-    for slot_id, polygon in SLOTS.items():
-        mask = slot_mask(gray.shape, polygon)
-        score = slot_feature_score(gray, edges, mask)
-        confidence = min(score / (OCCUPANCY_THRESHOLD * 1.6), 1.0)
-        results[slot_id] = {
-            "label": "Occupied" if score >= OCCUPANCY_THRESHOLD else "Vacant",
-            "score": round(score, 4),
-            "confidence": round(confidence, 3),
-        }
-    return img, results
 
+def analyze(path, slots, method="auto", capacity=0):
+    """slots: list of polygons in normalised coords. Returns dict incl. annotated BGR image."""
+    img = read_image(path)
+    h, w = img.shape[:2]
+    polys = [[(x * w, y * h) for x, y in s] for s in slots]
+    note, backend, boxes = None, "classic", []
 
-def draw_annotated_frame(img, results):
-    annotated = img.copy()
-    for slot_id, polygon in SLOTS.items():
-        pts = np.array(polygon, dtype=np.int32)
-        color = (0, 0, 255) if results[slot_id]["label"] == "Occupied" else (0, 255, 0)
-        cv2.polylines(annotated, [pts], True, color, 1)
+    model = get_yolo() if method in ("auto", "yolo") else None
+    if method in ("auto", "yolo") and model is None:
+        if method == "yolo":
+            raise RuntimeError("YOLO is not available: " + str(_yolo["error"]))
+        note = "YOLO unavailable, used basic OpenCV method (" + str(_yolo["error"]) + ")"
+
+    result_slots = []
+    if model is not None:
+        backend = "yolo"
+        boxes = detect_vehicles(model, img)
+        if polys:
+            occ, overlap = assign_boxes(polys, boxes)
+            for i in range(len(polys)):
+                if i in occ:
+                    result_slots.append({"label": f"S{i+1:02d}", "status": "occupied", "confidence": round(occ[i], 3)})
+                else:
+                    result_slots.append({"label": f"S{i+1:02d}", "status": "vacant", "confidence": round(1 - min(overlap[i], 1), 3)})
+            occupied = len(occ)
+            total = len(polys)
+        else:
+            occupied = len(boxes)
+            total = max(int(capacity or 0), occupied)
+    else:
+        if not polys:
+            raise ValueError("Define parking slots first (basic method needs slot polygons), or install ultralytics for YOLO.")
+        for i, sc in enumerate(_classic_scores(img, polys)):
+            conf = min(sc / (CLASSIC_THRESHOLD * 1.6), 1.0)
+            st = "occupied" if sc >= CLASSIC_THRESHOLD else "vacant"
+            result_slots.append({"label": f"S{i+1:02d}", "status": st, "confidence": round(conf if st == "occupied" else 1 - conf, 3)})
+        occupied = sum(s["status"] == "occupied" for s in result_slots)
+        total = len(polys)
+
+    # annotated picture
+    ann, t = img.copy(), max(1, round(w / 700))
+    for i, p in enumerate(polys):
+        col = (60, 60, 230) if result_slots[i]["status"] == "occupied" else (80, 200, 60)
+        pts = np.array(p, np.int32)
+        cv2.polylines(ann, [pts], True, col, t, cv2.LINE_AA)
         cx, cy = pts.mean(axis=0).astype(int)
-        cv2.putText(annotated, str(slot_id), (cx - 4, cy),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.3, color, 1, cv2.LINE_AA)
-    return annotated
-
-
-def accuracy(results):
-    correct = sum(1 for s, r in results.items() if r["label"] == GROUND_TRUTH[s])
-    return round(100.0 * correct / len(results), 2)
+        cv2.putText(ann, str(i + 1), (cx - 6, cy + 4), cv2.FONT_HERSHEY_SIMPLEX, 0.35 + 0.15 * t, col, t, cv2.LINE_AA)
+    for x1, y1, x2, y2, c in boxes:
+        cv2.rectangle(ann, (int(x1), int(y1)), (int(x2), int(y2)), (0, 215, 255), t)
+        cv2.putText(ann, f"{c:.2f}", (int(x1), max(int(y1) - 3, 10)), cv2.FONT_HERSHEY_SIMPLEX, 0.4 + 0.1 * t, (0, 215, 255), t, cv2.LINE_AA)
+    return {"annotated": ann, "backend": backend, "vehicles": len(boxes), "slots": result_slots,
+            "occupied": occupied, "vacant": total - occupied, "total": total, "note": note}

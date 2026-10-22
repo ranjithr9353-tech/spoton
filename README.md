@@ -1,26 +1,22 @@
-# SpotON – Smart Parking Dashboard (OpenCV + Flask)
+# SpotON Pro – Smart Parking with real map + real image analysis
+
+- **Map:** Google Maps (if `GOOGLE_MAPS_API_KEY` is set) or OpenStreetMap (no key needed). Drag pins to fix locations, click **+ Add zone** to add new ones.
+- **Analysis:** upload a REAL photo of a parking area. YOLOv8 finds the vehicles, then each slot you defined is marked occupied/vacant.
+  With no slots defined it simply counts vehicles and subtracts from the zone capacity.
+- **Directions:** every zone has Google Maps directions / open links.
 
 ## Run
-```bash
-pip install -r requirements.txt
-python app.py
-```
-Open http://127.0.0.1:5000
+    pip install -r requirements.txt
+    python app.py            # open http://127.0.0.1:5000
 
-`data/Picture1.png` is included. If you delete it, it is regenerated automatically on startup (`make_sample.py`).
+Optional Google Maps:
+    export GOOGLE_MAPS_API_KEY=your_key      (Windows PowerShell: $env:GOOGLE_MAPS_API_KEY="your_key")
 
-## Using a Kaggle image
-1. Download any parking-lot dataset from Kaggle (e.g. search "PKLot" or "parking lot images") and pick a frame.
-2. In the dashboard, click **MG Road Street Parking → Upload new frame**.
-   The image is resized to 480×240 and the 12 slot polygons are applied to it.
+## Use
+1. Pick a zone, **Upload image** (a Kaggle parking photo, e.g. from PKLot, or your own).
+2. Optional but recommended: **Define slots** – choose "Row of bays", click the 4 corners of a row
+   (top-left, top-right, bottom-right, bottom-left), enter how many bays it has. Repeat for each row, then Save.
+3. Results, annotated image and map pin colour update automatically.
 
-Note: the slot polygons and ground-truth labels in `detector.py` are fixed (slots 1–6 occupied, 7–12 vacant),
-so the "accuracy" figure is only meaningful for the sample image. For a real dataset, redraw the `SLOTS`
-polygons for that camera view and update `GROUND_TRUTH`.
-
-## Files
-- `detector.py` – slot polygons + edge/variance occupancy logic
-- `app.py` – Flask API (`/api/zones`, `/api/annotated.jpg`, `/api/detect`, `/api/rerun`)
-- `static/index.html` – map dashboard (MG Road is live; other zones are demo data)
-- `make_sample.py` – generates the sample camera frame
-- Tune `OCCUPANCY_THRESHOLD` in `detector.py` if accuracy is low.
+The first analysis downloads the small YOLO model (yolov8n.pt, ~6 MB).
+Uploaded data is stored in `data/` (not committed to git).

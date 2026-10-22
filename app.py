@@ -1,66 +1,83 @@
-"""SpotON backend: runs the OpenCV detector and serves the dashboard.
-Run:  python app.py   ->  http://127.0.0.1:5000
+"""SpotON Pro backend.
+Run:  python app.py  ->  http://127.0.0.1:5000
+Optional: set GOOGLE_MAPS_API_KEY to use Google Maps (otherwise OpenStreetMap is used).
 """
-import subprocess, sys
+import json, os, threading, time
 from pathlib import Path
+
 import cv2
-from flask import Flask, jsonify, request, Response, send_from_directory
-from detector import classify_slots, draw_annotated_frame, accuracy
+import numpy as np
+from flask import Flask, Response, jsonify, request, send_from_directory
+
+import detector
 
 BASE = Path(__file__).parent
 DATA = BASE / "data"
-DATA.mkdir(exist_ok=True)
-IMAGE = DATA / "Picture1.png"
+IMG, ANN = DATA / "images", DATA / "annotated"
+for p in (DATA, IMG, ANN):
+    p.mkdir(parents=True, exist_ok=True)
+STORE = DATA / "zones.json"
+LOCK = threading.RLock()
 
 app = Flask(__name__, static_folder="static")
-state = {"results": None, "jpg": None, "error": None, "accuracy": None}
+app.config["MAX_CONTENT_LENGTH"] = 25 * 1024 * 1024
 
-# Zone 1 is live (camera image + OpenCV). Others are demo data.
-DEMO_ZONES = [
-    {"id": 2, "name": "City Mall Commercial Lot", "zone_type": "commercial", "total": 20, "occupied": 14, "x": 330, "y": 210, "area": "Brigade Road"},
-    {"id": 3, "name": "Green Residency Apartments", "zone_type": "residential", "total": 15, "occupied": 6, "x": 160, "y": 370, "area": "Koramangala"},
-    {"id": 4, "name": "Presidency University Campus Lot", "zone_type": "campus", "total": 25, "occupied": 15, "x": 70, "y": 90, "area": "Yelahanka"},
-    {"id": 5, "name": "Weekend Market Temporary Lot", "zone_type": "temporary", "total": 10, "occupied": 7, "x": 320, "y": 440, "area": "HSR Layout"},
+# Approximate real Bengaluru locations. Drag a marker on the map to correct it.
+SEED = [
+    ("MG Road Street Parking", "street", "MG Road", 12.9756, 77.6066, 12),
+    ("City Mall Commercial Lot", "commercial", "Brigade Road", 12.9719, 77.6072, 20),
+    ("Green Residency Apartments", "residential", "Koramangala", 12.9352, 77.6245, 15),
+    ("Presidency University Campus Lot", "campus", "Yelahanka", 13.1620, 77.5640, 25),
+    ("Weekend Market Temporary Lot", "temporary", "HSR Layout", 12.9116, 77.6474, 10),
 ]
 
 
-def run_detection():
-    try:
-        if not IMAGE.exists():  # first run: create the sample frame automatically
-            subprocess.run([sys.executable, str(BASE / "make_sample.py")], cwd=BASE, check=True)
-        img, results = classify_slots(str(IMAGE))
-        ok, buf = cv2.imencode(".jpg", draw_annotated_frame(img, results))
-        state.update(results=results, jpg=buf.tobytes(), error=None, accuracy=accuracy(results))
-    except Exception as e:  # missing/corrupt image
-        state.update(results=None, jpg=None, error=str(e), accuracy=None)
+def new_zone(i, name, ztype, area, lat, lng, cap):
+    return {"id": i, "name": name, "zone_type": ztype, "area": area, "lat": lat, "lng": lng,
+            "capacity": cap, "slots": [], "method": "auto", "has_image": False, "result": None, "rev": 0}
 
 
-def build_zones():
-    zones = []
-    r = state["results"]
-    if r:
-        slots = [{"slot_label": f"MG-{i:02d}", "status": r[i]["label"].lower(),
-                  "confidence": r[i]["confidence"]} for i in sorted(r)]
-        occ = sum(s["status"] == "occupied" for s in slots)
-        zones.append({"id": 1, "name": "MG Road Street Parking", "zone_type": "street",
-                      "total_slots": len(slots), "occupied_slots": occ,
-                      "vacant_slots": len(slots) - occ, "x": 200, "y": 150,
-                      "area": "MG Road", "live": True, "accuracy": state["accuracy"],
-                      "slots": slots})
-    else:
-        zones.append({"id": 1, "name": "MG Road Street Parking", "zone_type": "street",
-                      "total_slots": 0, "occupied_slots": 0, "vacant_slots": 0,
-                      "x": 200, "y": 150, "area": "MG Road", "live": True,
-                      "error": state["error"], "slots": []})
-    for z in DEMO_ZONES:
-        prefix = z["zone_type"][:2].upper()
-        slots = [{"slot_label": f"{prefix}-{i:02d}",
-                  "status": "occupied" if i <= z["occupied"] else "vacant"}
-                 for i in range(1, z["total"] + 1)]
-        zones.append({**{k: z[k] for k in ("id", "name", "zone_type", "x", "y", "area")},
-                      "total_slots": z["total"], "occupied_slots": z["occupied"],
-                      "vacant_slots": z["total"] - z["occupied"], "live": False, "slots": slots})
-    return zones
+def load():
+    with LOCK:
+        if not STORE.exists():
+            save([new_zone(i + 1, *s) for i, s in enumerate(SEED)])
+        return json.loads(STORE.read_text())
+
+
+def save(zones):
+    with LOCK:
+        STORE.write_text(json.dumps(zones, indent=1))
+
+
+def find(zones, zid):
+    for z in zones:
+        if z["id"] == zid:
+            return z
+    return None
+
+
+def view(z):
+    r = z["result"]
+    out = {k: z[k] for k in ("id", "name", "zone_type", "area", "lat", "lng", "capacity", "slots", "method", "has_image", "rev")}
+    out["result"] = r
+    out["status"] = "live" if r else "no_data"
+    out["total_slots"] = r["total"] if r else z["capacity"]
+    out["occupied_slots"] = r["occupied"] if r else None
+    out["vacant_slots"] = r["vacant"] if r else None
+    return out
+
+
+def run_analysis(z):
+    path = IMG / f"zone_{z['id']}.jpg"
+    out = detector.analyze(str(path), z["slots"], z["method"], z["capacity"])
+    cv2.imwrite(str(ANN / f"zone_{z['id']}.jpg"), out.pop("annotated"))
+    out["analyzed_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
+    z["result"] = out
+    z["rev"] += 1
+
+
+def err(msg, code=400):
+    return jsonify(error=str(msg)), code
 
 
 @app.get("/")
@@ -68,37 +85,163 @@ def index():
     return send_from_directory("static", "index.html")
 
 
+@app.get("/api/config")
+def api_config():
+    return jsonify(google_key=os.environ.get("GOOGLE_MAPS_API_KEY", ""), yolo_installed=detector.yolo_installed())
+
+
 @app.get("/api/zones")
 def api_zones():
-    return jsonify(build_zones())
+    return jsonify([view(z) for z in load()])
 
 
-@app.get("/api/annotated.jpg")
-def api_annotated():
-    if not state["jpg"]:
-        return Response(status=404)
-    return Response(state["jpg"], mimetype="image/jpeg")
+@app.post("/api/zones")
+def api_add():
+    d = request.get_json(silent=True) or {}
+    try:
+        lat, lng, cap = float(d["lat"]), float(d["lng"]), int(d.get("capacity", 10))
+    except (KeyError, ValueError, TypeError):
+        return err("lat, lng and capacity are required numbers")
+    with LOCK:
+        zones = load()
+        z = new_zone(max([q["id"] for q in zones] + [0]) + 1, str(d.get("name") or "New zone")[:80],
+                     str(d.get("zone_type") or "street"), str(d.get("area") or ""), lat, lng, max(cap, 1))
+        zones.append(z)
+        save(zones)
+    return jsonify(view(z)), 201
 
 
-@app.post("/api/detect")
-def api_detect():
-    """Upload a new camera frame (form field 'image') and re-run detection."""
+@app.patch("/api/zones/<int:zid>")
+def api_patch(zid):
+    d = request.get_json(silent=True) or {}
+    with LOCK:
+        zones = load()
+        z = find(zones, zid)
+        if not z:
+            return err("No such zone", 404)
+        try:
+            for k in ("name", "zone_type", "area"):
+                if k in d:
+                    z[k] = str(d[k])[:80]
+            for k in ("lat", "lng"):
+                if k in d:
+                    z[k] = float(d[k])
+            if "capacity" in d:
+                z["capacity"] = max(int(d["capacity"]), 1)
+            if d.get("method") in ("auto", "yolo", "classic"):
+                z["method"] = d["method"]
+        except (ValueError, TypeError):
+            return err("Invalid value")
+        if z["has_image"] and ("capacity" in d or "method" in d):
+            try:
+                run_analysis(z)
+            except Exception as e:
+                save(zones)
+                return err(e)
+        z["rev"] += 1
+        save(zones)
+        return jsonify(view(z))
+
+
+@app.delete("/api/zones/<int:zid>")
+def api_delete(zid):
+    with LOCK:
+        zones = [z for z in load() if z["id"] != zid]
+        save(zones)
+    for p in (IMG / f"zone_{zid}.jpg", ANN / f"zone_{zid}.jpg"):
+        p.unlink(missing_ok=True)
+    return jsonify(ok=True)
+
+
+@app.post("/api/zones/<int:zid>/image")
+def api_image(zid):
     f = request.files.get("image")
     if not f:
-        return jsonify(error="No file uploaded (field name: image)"), 400
-    f.save(IMAGE)
-    run_detection()
-    if state["error"]:
-        return jsonify(error=state["error"]), 400
-    return jsonify(ok=True, accuracy=state["accuracy"])
+        return err("No file uploaded (field name: image)")
+    img = cv2.imdecode(np.frombuffer(f.read(), np.uint8), cv2.IMREAD_COLOR)
+    if img is None:
+        return err("That file is not a valid image")
+    h, w = img.shape[:2]
+    s = 1600 / max(h, w)
+    if s < 1:
+        img = cv2.resize(img, (int(w * s), int(h * s)))
+    with LOCK:
+        zones = load()
+        z = find(zones, zid)
+        if not z:
+            return err("No such zone", 404)
+        cv2.imwrite(str(IMG / f"zone_{zid}.jpg"), img)
+        z["has_image"] = True
+        try:
+            run_analysis(z)
+        except Exception as e:
+            z["result"] = None
+            z["rev"] += 1
+            save(zones)
+            return jsonify(error=str(e), zone=view(z)), 400
+        save(zones)
+        return jsonify(view(z))
 
 
-@app.post("/api/rerun")
-def api_rerun():
-    run_detection()
-    return jsonify(ok=state["error"] is None, error=state["error"])
+@app.post("/api/zones/<int:zid>/analyze")
+def api_analyze(zid):
+    with LOCK:
+        zones = load()
+        z = find(zones, zid)
+        if not z:
+            return err("No such zone", 404)
+        if not z["has_image"]:
+            return err("Upload an image for this zone first")
+        try:
+            run_analysis(z)
+        except Exception as e:
+            return err(e)
+        save(zones)
+        return jsonify(view(z))
+
+
+@app.put("/api/zones/<int:zid>/slots")
+def api_slots(zid):
+    d = request.get_json(silent=True) or {}
+    try:
+        slots = [[[min(max(float(x), 0), 1), min(max(float(y), 0), 1)] for x, y in poly] for poly in d["slots"]]
+        assert all(len(p) >= 3 for p in slots) and len(slots) <= 300
+    except Exception:
+        return err("slots must be a list of polygons (>=3 points, max 300 slots)")
+    with LOCK:
+        zones = load()
+        z = find(zones, zid)
+        if not z:
+            return err("No such zone", 404)
+        z["slots"] = slots
+        z["result"] = None if not z["has_image"] else z["result"]
+        warning = None
+        if z["has_image"]:
+            try:
+                run_analysis(z)
+            except Exception as e:
+                z["result"], warning = None, str(e)
+        z["rev"] += 1
+        save(zones)
+        return jsonify(zone=view(z), warning=warning)
+
+
+def _file(folder, zid):
+    p = folder / f"zone_{zid}.jpg"
+    if not p.exists():
+        return Response(status=404)
+    return Response(p.read_bytes(), mimetype="image/jpeg", headers={"Cache-Control": "no-store"})
+
+
+@app.get("/api/zones/<int:zid>/image")
+def api_raw(zid):
+    return _file(IMG, zid)
+
+
+@app.get("/api/zones/<int:zid>/annotated")
+def api_annotated(zid):
+    return _file(ANN, zid)
 
 
 if __name__ == "__main__":
-    run_detection()
-    app.run(debug=True, use_reloader=False)
+    app.run(host="0.0.0.0", port=5000, debug=False)
