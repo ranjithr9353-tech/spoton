@@ -1,22 +1,38 @@
-# SpotON Pro – Smart Parking with real map + real image analysis
+# SpotON – Smart Parking Locator (ResNet-50 + Maps)
 
-- **Map:** Google Maps (if `GOOGLE_MAPS_API_KEY` is set) or OpenStreetMap (no key needed). Drag pins to fix locations, click **+ Add zone** to add new ones.
-- **Analysis:** upload a REAL photo of a parking area. YOLOv8 finds the vehicles, then each slot you defined is marked occupied/vacant.
-  With no slots defined it simply counts vehicles and subtracts from the zone capacity.
-- **Directions:** every zone has Google Maps directions / open links.
+This project integrates deep-learning ResNet-50 bounding box detection (adapted from Kaggle's `shivamb/objects-bounding-boxes-using-resnet50-imageai`) with an interactive map locator to detect and monitor parking vacancy in real-time.
 
-## Run
-    pip install -r requirements.txt
-    python app.py            # open http://127.0.0.1:5000
+## Features
+- **ResNet-50 Object Detection Backbone**: Detects cars, buses, trucks, and motorcycles using neural bounding box predictions and IoU overlap over parking slots.
+- **Fail-safe Computer Vision Fallback**: If running in an offline environment without PyTorch preloaded weights, automatically falls back to OpenCV edge density & variance heuristics without crashing.
+- **Interactive Map Locator**: Displays real-time vacancy numbers directly on map markers with automatic camera inspection sidebar.
+- **Kaggle Kernel & Dataset Utilities**: Includes `kaggle_setup.py` to pull the ResNet50 notebook and the PKLot dataset.
 
-Optional Google Maps:
-    export GOOGLE_MAPS_API_KEY=your_key      (Windows PowerShell: $env:GOOGLE_MAPS_API_KEY="your_key")
+## Quick Start
 
-## Use
-1. Pick a zone, **Upload image** (a Kaggle parking photo, e.g. from PKLot, or your own).
-2. Optional but recommended: **Define slots** – choose "Row of bays", click the 4 corners of a row
-   (top-left, top-right, bottom-right, bottom-left), enter how many bays it has. Repeat for each row, then Save.
-3. Results, annotated image and map pin colour update automatically.
+1. Install dependencies:
+   ```bash
+   pip install -r requirements.txt
+   ```
 
-The first analysis downloads the small YOLO model (yolov8n.pt, ~6 MB).
-Uploaded data is stored in `data/` (not committed to git).
+2. Generate default sample frame:
+   ```bash
+   python make_sample.py
+   ```
+
+3. Launch application:
+   ```bash
+   python app.py
+   ```
+   Open `http://127.0.0.1:5000` in your web browser.
+
+## Pulling Kaggle Kernel & Dataset
+Configure your `~/.kaggle/kaggle.json` token, then run:
+```bash
+python kaggle_setup.py
+```
+Or run directly:
+```bash
+kaggle kernels pull shivamb/objects-bounding-boxes-using-resnet50-imageai
+kaggle datasets download -d alceubr/pklot -p data/ --unzip
+```

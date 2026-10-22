@@ -1,9 +1,11 @@
-"""SpotON backend: runs ResNet50 detector and serves dashboard with Google Maps."""
-import subprocess, sys
+"""
+SpotON Backend: ResNet-50 Object Detector & Interactive Geolocation Dashboard
+"""
+import os, sys, subprocess
 from pathlib import Path
 import cv2
 from flask import Flask, jsonify, request, Response, send_from_directory
-from detector import classify_slots, draw_annotated_frame, accuracy
+import detector
 
 BASE = Path(__file__).parent
 DATA = BASE / "data"
@@ -11,9 +13,8 @@ DATA.mkdir(exist_ok=True)
 IMAGE = DATA / "Picture1.png"
 
 app = Flask(__name__, static_folder="static")
-state = {"results": None, "jpg": None, "error": None, "accuracy": None}
+state = {"results": None, "jpg": None, "error": None, "accuracy": None, "vehicles": None}
 
-# Real Lat/Lng coordinates around Bengaluru
 ZONES = [
     {"id": 1, "name": "MG Road Street Parking (Live ResNet50)", "zone_type": "street", "lat": 12.9756, "lng": 77.6066, "area": "MG Road", "live": True},
     {"id": 2, "name": "Brigade Road Commercial Lot", "zone_type": "commercial", "total": 20, "occupied": 14, "lat": 12.9719, "lng": 77.6070, "area": "Brigade Road", "live": False},
@@ -26,18 +27,22 @@ def run_detection():
     try:
         if not IMAGE.exists():
             subprocess.run([sys.executable, str(BASE / "make_sample.py")], cwd=BASE, check=True)
-        img, results, detected_vehicles = classify_slots(str(IMAGE))
-        annotated = draw_annotated_frame(img, results, detected_vehicles)
+        img, results, detected_vehicles = detector.classify_slots(str(IMAGE))
+        annotated = detector.draw_annotated_frame(img, results, detected_vehicles)
         ok, buf = cv2.imencode(".jpg", annotated)
-        state.update(results=results, jpg=buf.tobytes(), error=None, accuracy=accuracy(results))
+        state.update(
+            results=results,
+            jpg=buf.tobytes(),
+            error=None,
+            accuracy=detector.accuracy(results),
+            vehicles=detected_vehicles
+        )
     except Exception as e:
-        state.update(results=None, jpg=None, error=str(e), accuracy=None)
+        state.update(results=None, jpg=None, error=str(e), accuracy=None, vehicles=None)
 
 def build_zones():
     zones_output = []
     r = state["results"]
-    
-    # Zone 1 (Live AI-monitored camera)
     z1 = ZONES[0]
     if r:
         slots = [{"slot_label": f"MG-{i:02d}", "status": r[i]["label"].lower(),
@@ -58,7 +63,6 @@ def build_zones():
             "error": state["error"], "slots": []
         })
 
-    # Demo Zones 2-5
     for z in ZONES[1:]:
         prefix = z["zone_type"][:2].upper()
         slots = [{"slot_label": f"{prefix}-{i:02d}",
@@ -98,6 +102,13 @@ def api_detect():
         return jsonify(error=state["error"]), 400
     return jsonify(ok=True, accuracy=state["accuracy"])
 
-if __name__ == "__main__":
+@app.post("/api/rerun")
+def api_rerun():
     run_detection()
-    app.run(debug=True, port=5000)
+    return jsonify(ok=state["error"] is None, error=state["error"])
+
+if __name__ == "__main__":
+    detector.init_model()
+    run_detection()
+    print("Serving SpotON on http://127.0.0.1:5000 ...")
+    app.run(debug=True, use_reloader=False, host="0.0.0.0", port=5000)

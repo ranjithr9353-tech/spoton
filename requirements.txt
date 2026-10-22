@@ -4,4 +4,4 @@ numpy>=1.26.0
 torch>=2.0.0
 torchvision>=0.15.0
 shapely>=2.0.0
-kaggle>=1.5.16
+requests>=2.31.0
