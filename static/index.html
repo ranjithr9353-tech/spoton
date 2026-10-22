@@ -6,7 +6,7 @@ cat << 'EOF' > static/index.html
   <title>SpotON – Smart Multi-Zone Parking Locator</title>
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <script src="https://cdn.tailwindcss.com"></script>
-  <!-- Leaflet Map Engine -->
+  <!-- Interactive Map Library (Self-contained, Zero API-Key Required) -->
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
   <style>
@@ -20,7 +20,7 @@ cat << 'EOF' > static/index.html
       font-size: 14px;
       box-shadow: 0 4px 12px rgba(0,0,0,0.6);
       border: 2px solid #ffffff;
-      transition: all 0.3s ease;
+      transition: transform 0.2s;
     }
     .badge-marker:hover {
       transform: scale(1.15);
@@ -29,7 +29,7 @@ cat << 'EOF' > static/index.html
 </head>
 <body class="bg-slate-950 text-slate-100 flex flex-col h-screen select-none font-sans">
 
-  <!-- Header with Live Date & Time at the corner -->
+  <!-- Header -->
   <header class="bg-slate-900 border-b border-slate-800 px-6 py-3 flex items-center justify-between shadow-md">
     <div class="flex items-center gap-3">
       <div class="w-3.5 h-3.5 rounded-full bg-emerald-500 animate-pulse"></div>
@@ -38,31 +38,21 @@ cat << 'EOF' > static/index.html
         Vision-Based Occupancy Detection
       </span>
     </div>
-
-    <!-- Live Date and Time Corner Display -->
-    <div class="flex items-center gap-3">
-      <div class="text-xs bg-slate-800 border border-slate-700 px-3 py-1 rounded-md font-mono text-emerald-400" id="live-clock">
-        --:--:--
-      </div>
-      <div class="text-xs text-slate-400 font-mono hidden md:block">Bengaluru Multi-Zone Grid</div>
-    </div>
+    <div class="text-xs text-slate-400 font-mono">Bengaluru Multi-Zone Grid</div>
   </header>
 
-  <!-- Main Grid Area -->
+  <!-- Main View -->
   <div class="flex flex-1 overflow-hidden">
-    <!-- Map Container -->
     <div class="flex-1 relative">
       <div id="map"></div>
     </div>
 
-    <!-- Right Sidebar Inspector -->
     <div class="w-96 bg-slate-900 border-l border-slate-800 p-5 flex flex-col gap-4 overflow-y-auto shadow-2xl">
       <div>
         <h2 id="zone-title" class="text-lg font-bold text-white">Select a Parking Lot</h2>
         <p id="zone-meta" class="text-xs text-slate-400">Click any marker pin on the map to inspect real-time bay availability.</p>
       </div>
 
-      <!-- Quick Metrics -->
       <div class="grid grid-cols-2 gap-3">
         <div class="bg-slate-800/80 p-3 rounded-lg border border-slate-700">
           <div class="text-xs text-slate-400 font-medium">Available Bays</div>
@@ -74,7 +64,7 @@ cat << 'EOF' > static/index.html
         </div>
       </div>
 
-      <!-- Live Camera Stream (Zone 1) -->
+      <!-- Live Camera Stream -->
       <div id="camera-section" class="flex flex-col gap-2">
         <div class="flex justify-between items-center text-xs font-semibold text-slate-300">
           <span>AI CAMERA STREAM</span>
@@ -84,13 +74,12 @@ cat << 'EOF' > static/index.html
           <img id="annotated-stream" src="/api/annotated.jpg" alt="Parking Stream" class="w-full object-cover">
         </div>
         <form id="upload-form" class="mt-1 flex flex-col gap-2">
-          <label class="text-xs text-slate-400 font-medium">Test Frame from Kaggle:</label>
+          <label class="text-xs text-slate-400 font-medium">Upload new frame / Kaggle image:</label>
           <input type="file" id="image-input" accept="image/*" class="text-xs text-slate-400 file:bg-slate-800 file:text-slate-200 file:border-0 file:py-1 file:px-2.5 file:rounded hover:file:bg-slate-700 cursor-pointer">
           <button type="submit" class="bg-indigo-600 hover:bg-indigo-500 py-2 px-3 rounded text-xs font-semibold text-white transition shadow">Run Detection</button>
         </form>
       </div>
 
-      <!-- Parking Slot Matrix -->
       <div class="flex flex-col gap-2 mt-2">
         <div class="text-xs font-semibold text-slate-400 tracking-wider">PARKING BAY MATRIX</div>
         <div id="slot-grid" class="grid grid-cols-4 gap-2"></div>
@@ -99,41 +88,27 @@ cat << 'EOF' > static/index.html
   </div>
 
   <script>
-    let map, markerMap = {}, zonesData = [];
-
-    // Live Clock Function
-    function updateClock() {
-      const now = new Date();
-      const options = { 
-        year: 'numeric', month: 'short', day: 'numeric', 
-        hour: '2-digit', minute: '2-digit', second: '2-digit',
-        hour12: false 
-      };
-      document.getElementById('live-clock').textContent = now.toLocaleString('en-US', options);
-    }
-    setInterval(updateClock, 1000);
-    updateClock();
+    let map, markers = [], zonesData = [];
 
     function initMap() {
       map = L.map('map').setView([12.9756, 77.6066], 12);
 
-      // Unrestricted Esri World Street Map Tiles (Zero 403 blocks)
-      L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Street_Map/MapServer/tile/{z}/{y}/{x}', {
-        maxZoom: 19,
-        attribution: 'Tiles &copy; Esri &mdash; Bengaluru Smart Grid'
+      // CartoDB Dark Matter map tiles (clean, dark theme with zero API key requirement)
+      L.tileLayer('https://{s}.basemaps.cartocdn.com/rastertiles/dark_all/{z}/{x}/{y}{r}.png', {
+        attribution: '&copy; OpenStreetMap contributors &copy; CARTO',
+        subdomains: 'abcd',
+        maxZoom: 19
       }).addTo(map);
 
       fetchZones();
-      setInterval(fetchZones, 3000); // Automatically polls & changes occupancy every 3 seconds
+      setInterval(fetchZones, 5000); // 5-second polling interval as documented in paper
     }
 
     async function fetchZones() {
       try {
         const res = await fetch('/api/zones');
-        const json = await res.json();
-        zonesData = json.zones;
-        renderOrUpdateMarkers();
-        
+        zonesData = await res.json();
+        renderMarkers();
         if (zonesData.length > 0 && !window.selectedZoneId) {
           selectZone(zonesData[0]);
         } else if (window.selectedZoneId) {
@@ -148,34 +123,20 @@ cat << 'EOF' > static/index.html
     function renderOrUpdateMarkers() {
       zonesData.forEach(zone => {
         const color = zone.vacant_slots > 0 ? '#10b981' : '#ef4444';
-        const htmlBadge = `<div class="badge-marker" style="background-color: ${color}; width: 36px; height: 36px;">${zone.vacant_slots}</div>`;
+        const customIcon = L.divIcon({
+          className: 'custom-pin',
+          html: `<div class="badge-marker" style="background-color: ${color}; width: 36px; height: 36px;">${zone.vacant_slots}</div>`,
+          iconSize: [36, 36],
+          iconAnchor: [18, 18]
+        });
 
-        if (!markerMap[zone.id]) {
-          const customIcon = L.divIcon({
-            className: 'custom-pin',
-            html: htmlBadge,
-            iconSize: [36, 36],
-            iconAnchor: [18, 18]
-          });
-
-          const marker = L.marker([zone.lat, zone.lng], { icon: customIcon }).addTo(map);
-          marker.bindTooltip(`<b>${zone.name}</b><br>Vacant: ${zone.vacant_slots}/${zone.total_slots}`, { direction: 'top' });
-          marker.on('click', () => {
-            selectZone(zone);
-            map.panTo([zone.lat, zone.lng]);
-          });
-          markerMap[zone.id] = marker;
-        } else {
-          // Dynamic in-place update for all locations without reloading
-          const marker = markerMap[zone.id];
-          marker.setIcon(L.divIcon({
-            className: 'custom-pin',
-            html: htmlBadge,
-            iconSize: [36, 36],
-            iconAnchor: [18, 18]
-          }));
-          marker.setTooltipContent(`<b>${zone.name}</b><br>Vacant: ${zone.vacant_slots}/${zone.total_slots}`);
-        }
+        const marker = L.marker([zone.lat, zone.lng], { icon: customIcon }).addTo(map);
+        marker.bindTooltip(`<b>${zone.name}</b><br>Vacant: ${zone.vacant_slots}/${zone.total_slots}`, { direction: 'top' });
+        marker.on('click', () => {
+          selectZone(zone);
+          map.panTo([zone.lat, zone.lng]);
+        });
+        markers.push(marker);
       });
     }
 
@@ -202,7 +163,7 @@ cat << 'EOF' > static/index.html
       grid.innerHTML = "";
       zone.slots.forEach(s => {
         const d = document.createElement("div");
-        d.className = `p-2 rounded text-center text-xs font-mono border transition-all ${
+        d.className = `p-2 rounded text-center text-xs font-mono border ${
           s.status === 'vacant'
             ? 'bg-emerald-950/40 border-emerald-500/50 text-emerald-400'
             : 'bg-rose-950/40 border-rose-500/50 text-rose-400'
@@ -216,6 +177,7 @@ cat << 'EOF' > static/index.html
       e.preventDefault();
       const fileInput = document.getElementById("image-input");
       if (!fileInput.files[0]) return alert("Please select an image frame first");
+
       const fd = new FormData();
       fd.append("image", fileInput.files[0]);
       const res = await fetch("/api/detect", { method: "POST", body: fd });
