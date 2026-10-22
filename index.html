@@ -1,0 +1,184 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>SpotON – Smart Parking Locator (ResNet-50 + Google Maps)</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <script src="https://cdn.tailwindcss.com"></script>
+  <!-- Google Maps JavaScript API (Pass your GOOGLE_MAPS_API_KEY in the script tag) -->
+  <script src="https://maps.googleapis.com/maps/api/js?key=YOUR_GOOGLE_MAPS_API_KEY&libraries=places"></script>
+  <style>
+    #map { height: 100%; width: 100%; min-height: 480px; }
+  </style>
+</head>
+<body class="bg-slate-950 text-slate-100 flex flex-col h-screen">
+
+  <!-- Header -->
+  <header class="bg-slate-900 border-b border-slate-800 px-6 py-4 flex items-center justify-between shadow-md">
+    <div class="flex items-center gap-3">
+      <div class="w-3 h-3 rounded-full bg-emerald-500 animate-pulse"></div>
+      <h1 class="text-xl font-bold tracking-wide">SpotON Locator</h1>
+      <span class="text-xs bg-indigo-900/80 text-indigo-300 border border-indigo-700 px-2.5 py-0.5 rounded-full font-mono">
+        ResNet-50 Object Detection
+      </span>
+    </div>
+    <div class="text-xs text-slate-400">Bengaluru City Parking Grid</div>
+  </header>
+
+  <!-- Main View -->
+  <div class="flex flex-1 overflow-hidden">
+    <!-- Map Locator Container -->
+    <div class="flex-1 relative">
+      <div id="map"></div>
+    </div>
+
+    <!-- Sidebar / Camera Inspector -->
+    <div class="w-96 bg-slate-900 border-l border-slate-800 p-5 flex flex-col gap-4 overflow-y-auto">
+      <div>
+        <h2 id="zone-title" class="text-lg font-semibold">Select a Parking Lot</h2>
+        <p id="zone-meta" class="text-sm text-slate-400">Click a marker on Google Maps to inspect availability.</p>
+      </div>
+
+      <!-- Live Statistics -->
+      <div class="grid grid-cols-2 gap-3">
+        <div class="bg-slate-800/80 p-3 rounded-lg border border-slate-700">
+          <div class="text-xs text-slate-400">Vacant Slots</div>
+          <div id="vacant-count" class="text-2xl font-bold text-emerald-400">--</div>
+        </div>
+        <div class="bg-slate-800/80 p-3 rounded-lg border border-slate-700">
+          <div class="text-xs text-slate-400">Occupancy</div>
+          <div id="occupancy-rate" class="text-2xl font-bold text-amber-400">--</div>
+        </div>
+      </div>
+
+      <!-- Live ResNet Frame (Shown when Zone 1 is selected) -->
+      <div id="camera-section" class="flex flex-col gap-2">
+        <div class="flex justify-between items-center text-xs font-medium text-slate-300">
+          <span>LIVE RESNET-50 FEED</span>
+          <span id="model-accuracy" class="text-emerald-400 font-mono"></span>
+        </div>
+        <div class="relative rounded-lg overflow-hidden border border-slate-700 bg-black">
+          <img id="annotated-stream" src="/api/annotated.jpg" alt="Parking Stream" class="w-full object-cover">
+        </div>
+        <form id="upload-form" class="mt-2 flex flex-col gap-2">
+          <label class="text-xs text-slate-400">Test with new image / Kaggle frame:</label>
+          <input type="file" id="image-input" accept="image/*" class="text-xs text-slate-400 file:bg-slate-800 file:text-slate-200 file:border-0 file:py-1 file:px-2 file:rounded hover:file:bg-slate-700 cursor-pointer">
+          <button type="submit" class="bg-indigo-600 hover:bg-indigo-500 py-1.5 px-3 rounded text-xs font-medium text-white transition">Run ResNet-50 Inference</button>
+        </form>
+      </div>
+
+      <!-- Slot Matrix -->
+      <div class="flex flex-col gap-2 mt-2">
+        <div class="text-xs font-semibold text-slate-400">SLOT AVAILABILITY</div>
+        <div id="slot-grid" class="grid grid-cols-4 gap-2"></div>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    let map, markers = [], zonesData = [];
+
+    async function initMap() {
+      // Centered on central Bengaluru
+      map = new google.maps.Map(document.getElementById("map"), {
+        center: { lat: 12.9716, lng: 77.5946 },
+        zoom: 12,
+        styles: [
+          { elementType: "geometry", stylers: [{ color: "#242f3e" }] },
+          { elementType: "labels.text.stroke", stylers: [{ color: "#242f3e" }] },
+          { elementType: "labels.text.fill", stylers: [{ color: "#746855" }] },
+          { featureType: "road", elementType: "geometry", stylers: [{ color: "#38414e" }] }
+        ]
+      });
+
+      fetchZones();
+    }
+
+    async function fetchZones() {
+      const res = await fetch('/api/zones');
+      zonesData = await res.json();
+      renderMarkers();
+      if (zonesData.length > 0) selectZone(zonesData[0]);
+    }
+
+    function renderMarkers() {
+      markers.forEach(m => m.setMap(null));
+      markers = [];
+
+      zonesData.forEach(zone => {
+        const marker = new google.maps.Marker({
+          position: { lat: zone.lat, lng: zone.lng },
+          map: map,
+          title: zone.name,
+          label: {
+            text: `${zone.vacant_slots}`,
+            color: "white",
+            fontWeight: "bold"
+          },
+          icon: {
+            path: google.maps.SymbolPath.CIRCLE,
+            fillColor: zone.vacant_slots > 0 ? "#10b981" : "#ef4444",
+            fillOpacity: 0.9,
+            strokeWeight: 2,
+            strokeColor: "#ffffff",
+            scale: 16
+          }
+        });
+
+        marker.addListener("click", () => selectZone(zone));
+        markers.push(marker);
+      });
+    }
+
+    function selectZone(zone) {
+      document.getElementById("zone-title").textContent = zone.name;
+      document.getElementById("zone-meta").textContent = `${zone.area} • ${zone.zone_type.toUpperCase()}`;
+      document.getElementById("vacant-count").textContent = `${zone.vacant_slots} / ${zone.total_slots}`;
+      const occPercent = Math.round((zone.occupied_slots / zone.total_slots) * 100) || 0;
+      document.getElementById("occupancy-rate").textContent = `${occPercent}%`;
+
+      const camSection = document.getElementById("camera-section");
+      if (zone.live) {
+        camSection.classList.remove("hidden");
+        document.getElementById("model-accuracy").textContent = `Accuracy: ${zone.accuracy}%`;
+        document.getElementById("annotated-stream").src = `/api/annotated.jpg?t=${Date.now()}`;
+      } else {
+        camSection.classList.add("hidden");
+      }
+
+      // Populate Slot Grid
+      const grid = document.getElementById("slot-grid");
+      grid.innerHTML = "";
+      zone.slots.forEach(s => {
+        const d = document.createElement("div");
+        d.className = `p-2 rounded text-center text-xs font-mono border ${
+          s.status === 'vacant' 
+            ? 'bg-emerald-950/40 border-emerald-500/50 text-emerald-400' 
+            : 'bg-rose-950/40 border-rose-500/50 text-rose-400'
+        }`;
+        d.textContent = s.slot_label;
+        grid.appendChild(d);
+      });
+    }
+
+    document.getElementById("upload-form").addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const fileInput = document.getElementById("image-input");
+      if (!fileInput.files[0]) return alert("Select an image first");
+
+      const fd = new FormData();
+      fd.append("image", fileInput.files[0]);
+
+      const res = await fetch("/api/detect", { method: "POST", body: fd });
+      const data = await res.json();
+      if (data.ok) {
+        fetchZones();
+      } else {
+        alert("Detection error: " + data.error);
+      }
+    });
+
+    window.onload = initMap;
+  </script>
+</body>
+</html>
