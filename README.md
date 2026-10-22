@@ -1,38 +1,30 @@
-# SpotON – Smart Parking Locator (ResNet-50 + Maps)
+# SpotON: Smart Real-Time Multi-Zone Parking Management System
 
-This project integrates deep-learning ResNet-50 bounding box detection (adapted from Kaggle's `shivamb/objects-bounding-boxes-using-resnet50-imageai`) with an interactive map locator to detect and monitor parking vacancy in real-time.
+Self-contained vision-based parking vacancy detection and GIS locator dashboard.
 
-## Features
-- **ResNet-50 Object Detection Backbone**: Detects cars, buses, trucks, and motorcycles using neural bounding box predictions and IoU overlap over parking slots.
-- **Fail-safe Computer Vision Fallback**: If running in an offline environment without PyTorch preloaded weights, automatically falls back to OpenCV edge density & variance heuristics without crashing.
-- **Interactive Map Locator**: Displays real-time vacancy numbers directly on map markers with automatic camera inspection sidebar.
-- **Kaggle Kernel & Dataset Utilities**: Includes `kaggle_setup.py` to pull the ResNet50 notebook and the PKLot dataset.
+## 🚀 Instant Run Instructions
 
-## Quick Start
-
-1. Install dependencies:
+1. **Install requirements**:
    ```bash
    pip install -r requirements.txt
    ```
 
-2. Generate default sample frame:
+2. **Run with a single command**:
    ```bash
-   python make_sample.py
+   python run.py
+   ```
+   *(Or run `python app.py`)*
+
+3. **Open in your browser**:
+   Navigate to:
+   ```
+   http://127.0.0.1:5000
    ```
 
-3. Launch application:
-   ```bash
-   python app.py
-   ```
-   Open `http://127.0.0.1:5000` in your web browser.
+---
 
-## Pulling Kaggle Kernel & Dataset
-Configure your `~/.kaggle/kaggle.json` token, then run:
-```bash
-python kaggle_setup.py
-```
-Or run directly:
-```bash
-kaggle kernels pull shivamb/objects-bounding-boxes-using-resnet50-imageai
-kaggle datasets download -d alceubr/pklot -p data/ --unzip
-```
+## 🌟 Included Features
+- **Zero API Key Requirement**: Uses high-performance dark Carto/OpenStreetMap tiles that load instantly anywhere without Google Cloud billing blocks.
+- **Pre-packaged Sample Frame**: Automatically generates `data/Picture1.png` on launch.
+- **Live Frame Upload**: Use the dashboard UI to upload any parking lot image (e.g. from Kaggle PKLot) to test real-time detection.
+- **Multi-Zone Support**: 5 distinct zone categories (Street, Commercial, Residential, Campus, Temporary) with live slot meters.
