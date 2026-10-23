@@ -12,7 +12,11 @@ STATIC_DIR = BASE / "static"
 
 app = Flask(__name__, static_folder=str(STATIC_DIR))
 
-# All zones are now marked live: True with their own image store
+HOURLY_RATE = 40  # ₹40 per hour
+
+# In-memory booking registry: key = (zone_id, slot_label) -> booking details
+ACTIVE_BOOKINGS = {}
+
 ZONES = [
     {"id": 1, "name": "MG Road Street Parking", "zone_type": "street", "total": 12, "lat": 12.9756, "lng": 77.6066, "area": "MG Road", "live": True},
     {"id": 2, "name": "Brigade Road Commercial Lot", "zone_type": "commercial", "total": 20, "lat": 12.9719, "lng": 77.6070, "area": "Brigade Road", "live": True},
@@ -21,14 +25,12 @@ ZONES = [
     {"id": 5, "name": "HSR Sector 2 Temporary Lot", "zone_type": "temporary", "total": 10, "lat": 12.9116, "lng": 77.6389, "area": "HSR Layout", "live": True},
 ]
 
-# Separate storage state for every zone
 zone_states = {}
 
 def init_zone_state(zid):
     if zid not in zone_states:
         img_path = DATA / f"zone_{zid}.png"
         if not img_path.exists():
-            # If no custom image yet, generate a baseline frame
             subprocess.run([sys.executable, str(BASE / "make_sample.py")], cwd=str(BASE), check=True)
             default_sample = DATA / "Picture1.png"
             if default_sample.exists():
@@ -58,33 +60,39 @@ def build_zones():
         total = z["total"]
         prefix = z["zone_type"][:2].upper()
 
-        if r:
-            slots = []
-            for i in range(1, total + 1):
-                # Map detected slot or extrapolate
+        slots = []
+        for i in range(1, total + 1):
+            slot_lbl = f"{prefix}-{i:02d}"
+            booking_key = (zid, slot_lbl)
+
+            if booking_key in ACTIVE_BOOKINGS:
+                status = "booked"
+                conf = 1.0
+            elif r:
                 detected = r.get(i)
                 status = detected["label"].lower() if detected else ("occupied" if i % 2 == 0 else "vacant")
                 conf = detected["confidence"] if detected else 0.85
-                slots.append({"slot_label": f"{prefix}-{i:02d}", "status": status, "confidence": conf})
+            else:
+                status = "vacant"
+                conf = 0.90
 
-            occ = sum(s["status"] == "occupied" for s in slots)
-            output.append({
-                **z,
-                "total_slots": total,
-                "occupied_slots": occ,
-                "vacant_slots": total - occ,
-                "accuracy": st["accuracy"] or 91.5,
-                "slots": slots
+            slots.append({
+                "slot_label": slot_lbl,
+                "status": status,
+                "confidence": conf,
+                "rate_per_hour": HOURLY_RATE
             })
-        else:
-            output.append({
-                **z,
-                "total_slots": total,
-                "occupied_slots": total // 2,
-                "vacant_slots": total - (total // 2),
-                "error": st["error"],
-                "slots": []
-            })
+
+        occ = sum(s["status"] in ("occupied", "booked") for s in slots)
+        output.append({
+            **z,
+            "total_slots": total,
+            "occupied_slots": occ,
+            "vacant_slots": total - occ,
+            "accuracy": st["accuracy"] or 91.5,
+            "hourly_rate": HOURLY_RATE,
+            "slots": slots
+        })
     return output
 
 @app.after_request
@@ -98,7 +106,11 @@ def index():
 
 @app.get("/api/zones")
 def api_zones():
-    return jsonify({"timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"), "zones": build_zones()})
+    return jsonify({
+        "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "hourly_rate": HOURLY_RATE,
+        "zones": build_zones()
+    })
 
 @app.get("/api/annotated.jpg")
 def api_annotated():
@@ -124,6 +136,38 @@ def api_detect():
     if st["error"]:
         return jsonify(error=st["error"]), 400
     return jsonify(ok=True, accuracy=st["accuracy"])
+
+@app.post("/api/book")
+def api_book():
+    data = request.get_json(silent=True) or request.form
+    zid = int(data.get("zone_id", 1))
+    slot_label = data.get("slot_label")
+    hours = int(data.get("hours", 1))
+    vehicle_no = data.get("vehicle_no", "KA-01-XX-0000").strip().upper()
+
+    if not slot_label:
+        return jsonify(error="Please choose an available bay first"), 400
+
+    booking_key = (zid, slot_label)
+    if booking_key in ACTIVE_BOOKINGS:
+        return jsonify(error=f"Slot {slot_label} is already reserved!"), 409
+
+    total_amount = hours * HOURLY_RATE
+    booking_id = f"SPOT-{zid}{random.randint(1000, 9999)}"
+
+    record = {
+        "booking_id": booking_id,
+        "zone_id": zid,
+        "slot_label": slot_label,
+        "hours": hours,
+        "rate": HOURLY_RATE,
+        "total_amount": total_amount,
+        "vehicle_no": vehicle_no,
+        "booked_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    }
+    ACTIVE_BOOKINGS[booking_key] = record
+
+    return jsonify(ok=True, booking=record)
 
 if __name__ == "__main__":
     for z in ZONES:
